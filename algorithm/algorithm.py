@@ -1,10 +1,15 @@
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Literal
 import math
 
 
+# ============================================================
+#  TYPE DEFINITIONS
+# ============================================================
+
 FirmType = Literal["safe", "mixed", "risky"]
 Maturity = Literal["short", "long"]
+
 
 # ============================================================
 #  DATA CLASSES
@@ -12,9 +17,9 @@ Maturity = Literal["short", "long"]
 
 @dataclass
 class PrincipalInfo:
-    funding_need: float              # D
-    project_returns: List[float]     # [V1, V2]
-    belief_safe_score: float         # S in [0,100]
+    funding_need: float
+    project_returns: List[float]   # [V1, V2]
+    belief_safe_score: float
     pi_safe: float
     pi_mixed: float
     pi_risky: float
@@ -22,63 +27,50 @@ class PrincipalInfo:
 
 @dataclass
 class PlanSide:
-    zcb_price: float     # Zero-coupon bond price per unit face
-    max_cap: float       # Max amount that can be borrowed
+    zcb_price: float
+    max_cap: float
 
 
 @dataclass
 class Plan:
-    name: str            # "safe", "mixed", "risky"
-    club_A: PlanSide     # short-term
-    club_B: PlanSide     # long-term
+    name: str
+    club_A: PlanSide    # short-term side
+    club_B: PlanSide    # long-term side
 
 
 @dataclass
-class FirmCatalogResult:
+class FirmSimState:
     firm_id: int
     principal: PrincipalInfo
-    plans: Dict[str, Plan]     # "safe", "mixed", "risky"
-    opt_out: bool
-    expected_welfare_hint: float
-    choice: Dict              # added in Step 5: firm selection info
+    true_type: FirmType
+    plans: Dict[str, Plan]
+    locked: bool = False
+    stable_rounds: int = 0
+    last_chosen_plan: str | None = None
+    history: List[Dict] = field(default_factory=list)
 
 
 # ============================================================
-#  BELIEF DECOMPOSITION
+#  BELIEF SYSTEM
 # ============================================================
 
 def _compute_beliefs_from_safe_score(safe_score: float) -> Dict[str, float]:
     """
-    Map a SAFE score S in [0,100] into probabilities over
-    safe / mixed / risky.
-
-    Intuition:
-      - High S  -> mostly safe
-      - Low S   -> mostly risky
-      - Middle S (~50) -> mostly mixed
-
-    pi_mixed is high near S=50 and low near the extremes.
-    The remaining probability is split between safe and risky
-    according to S.
+    Map S ∈ [0,100] into probabilities over safe/mixed/risky.
+    This is the same structure we used earlier.
     """
-    S = max(0.0, min(100.0, safe_score))  # clamp to [0,100]
+    S = max(0.0, min(100.0, safe_score))
     s = S / 100.0
     d = abs(S - 50.0)
 
-    # Tunable hyperparameters:
-    M_max = 0.5   # mixed probability when S = 50
-    M_min = 0.01   # mixed probability when S = 0 or 100
+    M_max = 0.5
+    M_min = 0.01
 
-    # 1) Mixed probability: high at center, low at extremes
     pi_mixed = M_min + (M_max - M_min) * (1.0 - d / 50.0)
-
-    # 2) Remaining mass goes to safe vs risky
     remaining = 1.0 - pi_mixed
-    safe_weight = s
-    risky_weight = 1.0 - s
 
-    pi_safe = remaining * safe_weight
-    pi_risky = remaining * risky_weight
+    pi_safe = remaining * s
+    pi_risky = remaining * (1.0 - s)
 
     return {
         "pi_safe": pi_safe,
@@ -88,14 +80,13 @@ def _compute_beliefs_from_safe_score(safe_score: float) -> Dict[str, float]:
 
 
 # ============================================================
-#  PROJECT VALUE & WELFARE FUNCTIONS
+#  ORIGINAL ALPHA / PROJECT VALUE LOGIC (YOUR VERSION)
 # ============================================================
 
 def _base_alpha_for_type(type_: FirmType) -> float:
     """
     Intrinsic preference for short-term (Year 1) vs long-term (Year 2).
     Higher alpha = more weight on Year 1. Lower alpha = more weight on Year 2.
-    Assume that the true firm types have fixed alphas as follows.
     """
     if type_ == "safe":
         return 0.7
@@ -122,46 +113,41 @@ def _simple_project_value(
       - extra bonus for (safe, short) and (risky, long).
     """
 
-    # -----------------------------
     # 1) Base alpha by true type
-    # -----------------------------
     base_alpha = _base_alpha_for_type(type_)
 
     # 2) Belief-weighted alpha over all types
-    alpha_safe  = _base_alpha_for_type("safe")
+    alpha_safe = _base_alpha_for_type("safe")
     alpha_mixed = _base_alpha_for_type("mixed")
     alpha_risky = _base_alpha_for_type("risky")
 
     belief_alpha = (
-        principal.pi_safe  * alpha_safe +
+        principal.pi_safe * alpha_safe +
         principal.pi_mixed * alpha_mixed +
         principal.pi_risky * alpha_risky
     )
 
     # 3) Blend true-type and belief view
-    #    blend in [0,1]; e.g. 0.5 = equal weight
     blend = 0.5
     alpha = (1.0 - blend) * base_alpha + blend * belief_alpha
 
-    # 4) Apply maturity tilt
+    # 4) Maturity tilt
     tilt = 0.2
     if maturity == "short":
         alpha = min(1.0, alpha + tilt)
     else:  # "long"
         alpha = max(0.0, alpha - tilt)
 
-    # 5) Apply discounting to Y1/Y2
+    # 5) Discounting / boosting of V1 and V2
     discount_v1 = 1.1   # boost early returns
     discount_v2 = 0.85  # discount later returns
 
     v1_adj = discount_v1 * V1
-    v2_adj = discount_v2 * V2   
+    v2_adj = discount_v2 * V2
 
     expected_multiplier = alpha * v1_adj + (1.0 - alpha) * v2_adj
 
-    # 6) Type–maturity bonus:
-    #    - SAFE + SHORT  gets bonus_factor
-    #    - RISKY + LONG  gets bonus_factor
+    # 6) Type–maturity bonus
     bonus_factor = 1.05
     bonus = 1.0
 
@@ -174,7 +160,6 @@ def _simple_project_value(
     return D * expected_multiplier * bonus
 
 
-
 def _type_base_project_value(
     type_: FirmType,
     D: float,
@@ -182,20 +167,17 @@ def _type_base_project_value(
     V2: float,
 ) -> float:
     """
-    Maturity-agnostic project value for STEP 5 (firm's payoff).
+    Maturity-agnostic project value for the firm's payoff.
 
-    Here we use ONLY the true type's intrinsic alpha and do NOT
-    apply any maturity tilt or belief adjustments, because the firm
-    knows its own type when evaluating its ex-post project value.
+    Uses ONLY the true type's intrinsic alpha and no belief adjustments,
+    because the firm knows its own type when evaluating its project.
     """
     alpha = _base_alpha_for_type(type_)
-
-    
     expected_multiplier = alpha * V1 + (1.0 - alpha) * V2
     return D * expected_multiplier
 
 
-def _expected_welfare_for_type( 
+def _expected_welfare_for_type(
     type_: FirmType,
     D: float,
     V1: float,
@@ -204,9 +186,8 @@ def _expected_welfare_for_type(
     principal: PrincipalInfo,
 ) -> float:
     """Welfare = project value - funding cost (D)."""
-    expected_welfare = _simple_project_value(type_, D, V1, V2, maturity, principal)
-    cost = D
-    return expected_welfare - cost
+    value = _simple_project_value(type_, D, V1, V2, maturity, principal)
+    return value - D
 
 
 def _orientation_scores(principal: PrincipalInfo) -> Dict:
@@ -217,28 +198,28 @@ def _orientation_scores(principal: PrincipalInfo) -> Dict:
     D = principal.funding_need
     V1, V2 = principal.project_returns
 
-    Ws_short = _expected_welfare_for_type("safe",  D, V1, V2, "short", principal)
-    Ws_long  = _expected_welfare_for_type("safe",  D, V1, V2, "long",  principal)
-    
+    Ws_short = _expected_welfare_for_type("safe", D, V1, V2, "short", principal)
+    Ws_long = _expected_welfare_for_type("safe", D, V1, V2, "long", principal)
+
     Wm_short = _expected_welfare_for_type("mixed", D, V1, V2, "short", principal)
-    Wm_long  = _expected_welfare_for_type("mixed", D, V1, V2, "long",  principal)
-    
+    Wm_long = _expected_welfare_for_type("mixed", D, V1, V2, "long", principal)
+
     Wr_short = _expected_welfare_for_type("risky", D, V1, V2, "short", principal)
-    Wr_long  = _expected_welfare_for_type("risky", D, V1, V2, "long",  principal)
+    Wr_long = _expected_welfare_for_type("risky", D, V1, V2, "long", principal)
 
     E_short = (
-        principal.pi_safe  * Ws_short +
+        principal.pi_safe * Ws_short +
         principal.pi_mixed * Wm_short +
         principal.pi_risky * Wr_short
     )
-    E_long  = (
-        principal.pi_safe  * Ws_long +
+    E_long = (
+        principal.pi_safe * Ws_long +
         principal.pi_mixed * Wm_long +
         principal.pi_risky * Wr_long
     )
 
     return {
-        "safe":  {"short": Ws_short, "long": Ws_long},
+        "safe": {"short": Ws_short, "long": Ws_long},
         "mixed": {"short": Wm_short, "long": Wm_long},
         "risky": {"short": Wr_short, "long": Wr_long},
         "expected_short": E_short,
@@ -247,204 +228,121 @@ def _orientation_scores(principal: PrincipalInfo) -> Dict:
 
 
 # ============================================================
-# BUILD CATALOG (SAFE / MIXED / RISKY PLANS)
+#  TYPE–PLAN FIT MULTIPLIERS (AFTER PLAN CHOICE)
+# ============================================================
+
+TYPE_PLAN_MULTIPLIER: Dict[FirmType, Dict[str, float]] = {
+    "safe": {
+        "safe": 1.00,
+        "mixed": 0.90,
+        "risky": 0.80,
+    },
+    "mixed": {
+        "safe": 0.90,
+        "mixed": 1.00,
+        "risky": 0.90,
+    },
+    "risky": {
+        "safe": 0.80,
+        "mixed": 0.90,
+        "risky": 1.00,
+    },
+}
+
+
+def _type_plan_multiplier(true_type: FirmType, plan_name: str) -> float:
+    return TYPE_PLAN_MULTIPLIER[true_type][plan_name]
+
+
+# ============================================================
+#  INITIAL CATALOG CONSTRUCTION
 # ============================================================
 
 def _build_plans_from_orientation(principal: PrincipalInfo,
                                   scores: Dict) -> Dict[str, Plan]:
     """
-    IC + Opt-Out aware catalog construction.
-
-    Design goals:
-      1. Use expected welfare orientation (short vs long) to tilt all plans slightly.
-      2. Give each plan (safe/mixed/risky) base prices & caps that align with its
-         intended true type:
-             - SAFE: short-oriented, low leverage
-             - MIXED: balanced
-             - RISKY: long-oriented, high leverage
-      3. Use the belief system (pi_safe, pi_mixed, pi_risky) to decide which plan is
-         favored / neutral / unfavored ACROSS plans:
-             - highest belief  -> favored
-             - middle belief   -> neutral
-             - lowest belief   -> unfavored
-         This affects both ZCB price (small bonus/penalty) and caps (big effect).
-      4. Ensure that for some belief–plan combinations, total caps < D so the firm
-         CANNOT raise full funding, making that plan invalid and pushing the firm
-         either to another plan or to Club C (opt-out).
+    Builds safe/mixed/risky plans with:
+      - Base IC-inspired structure (different prices & caps).
+      - Belief-driven favoring/unfavoring.
+      - Short vs long tilt based on expected_short vs expected_long.
     """
 
     D = principal.funding_need
-
-    # --------------------------------------------------
-    # 1) ORIENTATION TILT (short vs long) FROM EXPECTED WELFARE
-    # --------------------------------------------------
-    # Use the already computed expected welfares in 'scores'
     E_short = scores["expected_short"]
-    E_long  = scores["expected_long"]
-    delta = E_short - E_long  # >0 => world more short-oriented in expectation
+    E_long = scores["expected_long"]
 
-    # Smoothly map delta -> [-1, 1]
-    orientation_scale = 10.0
-    orientation_strength = math.tanh(delta / orientation_scale)
+    # How much the environment "likes" short vs long, from principal's POV
+    delta = E_short - E_long
+    orientation_strength = math.tanh(delta / 10.0)
 
-    # Small price tilt so we don't destroy the IC base structure
-    tilt_strength = 0.01
-    orient_adjust_short = +tilt_strength * orientation_strength
-    orient_adjust_long  = -tilt_strength * orientation_strength
+    tilt = 0.01 * orientation_strength
+    orient_short = +tilt
+    orient_long = -tilt
 
-    # --------------------------------------------------
-    # 2) IC-CONSISTENT BASE TABLES (PLAN x MATURITY)
-    # --------------------------------------------------
-    # Higher price = cheaper borrowing = more attractive to the firm.
-    # These are the "skeleton" incentives BEFORE beliefs or orientation tilt.
-
+    # Base prices and caps for each type/maturity (IC skeleton)
     BASE_PRICES = {
-        # SAFE: short-oriented, modest long
-        "safe": {
-            "short": 0.95,
-            "long":  0.88,
-        },
-        # MIXED: balanced, middle-of-the-road
-        "mixed": {
-            "short": 0.93,
-            "long":  0.90,
-        },
-        # RISKY: long-oriented; long must be attractive to risky types
-        "risky": {
-            "short": 0.90,
-            "long":  0.94,
-        },
+        "safe": {"short": 0.95, "long": 0.88},
+        "mixed": {"short": 0.93, "long": 0.90},
+        "risky": {"short": 0.90, "long": 0.94},
     }
 
-    # Caps as multiples of D.
-    # NOTE: totals are NOT huge; some will fail if also marked "unfavored".
     BASE_CAP_MULT = {
-        # SAFE: decent short funding, small long; safe types don't want huge leverage.
-        "safe": {
-            "short": 0.70,   # 0.7D
-            "long":  0.50,   # 0.5D  => total 1.2D before belief scaling
-        },
-        # MIXED: balanced, slightly more total capacity
-        "mixed": {
-            "short": 0.70,   # 0.7D
-            "long":  0.70,   # 0.7D  => total 1.4D
-        },
-        # RISKY: long-heavy; risky types want big upside on long
-        "risky": {
-            "short": 0.50,   # 0.5D
-            "long":  0.70,   # 0.9D  => total 1.4D
-        },
+        "safe": {"short": 0.70, "long": 0.50},
+        "mixed": {"short": 0.70, "long": 0.70},
+        "risky": {"short": 0.50, "long": 0.70},
     }
 
-    # --------------------------------------------------
-    # 3) BELIEF-DRIVEN FAVOR SYSTEM (ACROSS PLANS)
-    # --------------------------------------------------
-    # Use existing beliefs on types to decide which whole plan is favored.
+    # Favor levels by belief ordering
     belief_list = [
-        ("safe",  principal.pi_safe),
+        ("safe", principal.pi_safe),
         ("mixed", principal.pi_mixed),
         ("risky", principal.pi_risky),
     ]
-    belief_list.sort(key=lambda x: x[1], reverse=True)  # highest belief first
+    belief_list.sort(key=lambda x: x[1], reverse=True)
 
-    # highest -> favored, middle -> neutral, lowest -> unfavored
-    favor_levels: Dict[str, str] = {}
-    if len(belief_list) == 3:
-        favor_levels[belief_list[0][0]] = "favored"
-        favor_levels[belief_list[1][0]] = "neutral"
-        favor_levels[belief_list[2][0]] = "unfavored"
-    else:
-        # fallback (should not really happen)
-        for name, _ in belief_list:
-            favor_levels[name] = "neutral"
-
-    # How favor level affects prices (small) and caps (large).
-    FAVOR_PRICE_BONUS = {
-        "favored":   +0.01,
-        "neutral":    0.00,
-        "unfavored": -0.01,
-    }
-    FAVOR_CAP_SCALE = {
-        "favored":   1.20,   # +20% capacity
-        "neutral":   1.00,   # unchanged
-        "unfavored": 0.50,   # -50% capacity => often cannot reach D
+    favor_levels = {
+        belief_list[0][0]: "favored",
+        belief_list[1][0]: "neutral",
+        belief_list[2][0]: "unfavored",
     }
 
-    # --------------------------------------------------
-    # 4) HELPER: BUILD ONE PLAN-SIDE (SHORT or LONG)
-    # --------------------------------------------------
-    def build_side(plan_name: str, maturity: Maturity) -> PlanSide:
-        # IC skeleton
+    # Belief-based tweaks
+    FAVOR_PRICE = {
+        "favored": +0.01,  
+        "neutral": 0.0,
+        "unfavored": -0.01, 
+    }
+    FAVOR_CAP = {
+        "favored": 1.10,
+        "neutral": 1.00,
+        "unfavored": 0.90,
+    }
+
+    def side(plan_name: str, maturity: Maturity) -> PlanSide:
         base_price = BASE_PRICES[plan_name][maturity]
-        base_cap_mult = BASE_CAP_MULT[plan_name][maturity]
+        base_cap = BASE_CAP_MULT[plan_name][maturity] * D
 
-        # Orientation tilt: if world is short-oriented,
-        # - short prices go up (cheaper)
-        # - long prices go down (more expensive)
-        if maturity == "short":
-            price = base_price + orient_adjust_short
-        else:
-            price = base_price + orient_adjust_long
+        price = base_price + (orient_short if maturity == "short" else orient_long)
+        price += FAVOR_PRICE[favor_levels[plan_name]]
 
-        # Belief-driven favor system (across plans)
-        favor = favor_levels[plan_name]
-        price += FAVOR_PRICE_BONUS[favor]
-
-        # Clamp prices to a reasonable range
         price = max(0.5, min(0.995, price))
-
-        # Caps = base cap * belief-scaling * D
-        cap_mult = base_cap_mult * FAVOR_CAP_SCALE[favor]
-        cap = cap_mult * D
+        cap = base_cap * FAVOR_CAP[favor_levels[plan_name]]
 
         return PlanSide(
             zcb_price=round(price, 3),
-            max_cap=round(cap, 2),
+            max_cap=round(cap)
         )
 
-    # --------------------------------------------------
-    # 5) BUILD THE THREE PLANS
-    # --------------------------------------------------
-    safe_plan = Plan(
-        name="safe",
-        club_A=build_side("safe", "short"),
-        club_B=build_side("safe", "long"),
-    )
-
-    mixed_plan = Plan(
-        name="mixed",
-        club_A=build_side("mixed", "short"),
-        club_B=build_side("mixed", "long"),
-    )
-
-    risky_plan = Plan(
-        name="risky",
-        club_A=build_side("risky", "short"),
-        club_B=build_side("risky", "long"),
-    )
-
     return {
-        "safe": safe_plan,
-        "mixed": mixed_plan,
-        "risky": risky_plan,
+        "safe": Plan("safe", side("safe", "short"), side("safe", "long")),
+        "mixed": Plan("mixed", side("mixed", "short"), side("mixed", "long")),
+        "risky": Plan("risky", side("risky", "short"), side("risky", "long")),
     }
 
-# ============================================================
-#  STEP 5: FIRM CHOICE GIVEN TRUE TYPE
-# ============================================================
 
-def _principal_intended_plan_name(principal: PrincipalInfo) -> str:
-    """
-    Heuristic: the principal's intended plan is the type with the highest belief weight.
-    """
-    weights = {
-        "safe": principal.pi_safe,
-        "mixed": principal.pi_mixed,
-        "risky": principal.pi_risky,
-    }
-    # max by probability; ties resolved by order of dict
-    return max(weights, key=weights.get)
-
+# ============================================================
+#  PAYOFF ENGINE — GRID SEARCH, EXACT D FUNDING
+# ============================================================
 
 def _compute_plan_payoff_for_true_type(
     true_type: FirmType,
@@ -452,75 +350,107 @@ def _compute_plan_payoff_for_true_type(
     V1: float,
     V2: float,
     plan: Plan,
-) -> float:
+) -> Dict:
     """
-    Compute the firm's payoff under a single plan, given its true type.
-
-    Rules:
-      - Firm must raise full D. If caps of A+B cannot reach D => plan invalid -> payoff = -inf.
-      - If payoff < 0, firm will later choose Club C instead (0 payoff).
+    - Exact D funding required.
+    - Search all feasible (A,B) combos that respect caps.
+    - Choose minimum debt cost.
+    - Apply type plan fit multiplier to project value.
     """
-    cap_A = plan.club_A.max_cap
-    cap_B = plan.club_B.max_cap
 
-    # Borrow as much as possible, prioritizing Club A first, then B
-    borrow_A = min(cap_A, D)
-    remaining = max(D - borrow_A, 0.0)
-    borrow_B = min(cap_B, remaining)
-    total_borrowed = borrow_A + borrow_B
+    cap_A = int(plan.club_A.max_cap)
+    cap_B = int(plan.club_B.max_cap)
 
-    if total_borrowed + 1e-9 < D:
-        # Cannot raise full funding => invalid plan
-        return float("-inf")
+    best_cost = float("inf")
+    best_a = None
+    best_b = None
 
-    # Project value from the true type (no maturity tilt here)
-    value = _type_base_project_value(true_type, D, V1, V2)
+    for a in range(0, cap_A + 1):
+        b = D - a
+        if b < 0:
+            break
+        if 0 <= b <= cap_B:
+            cost = plan.club_A.zcb_price * a + plan.club_B.zcb_price * b
+            if cost < best_cost:
+                best_cost = cost
+                best_a = a
+                best_b = b
 
-    # Cost of borrowing
-    cost_A = plan.club_A.zcb_price * borrow_A
-    cost_B = plan.club_B.zcb_price * borrow_B
-    cost = cost_A + cost_B
+    if best_a is None:
+        # Cannot raise full D under this plan
+        return {
+            "payoff": float("Insufficient-funding"),
+            "valid": False,
+            "borrow_A": 0,
+            "borrow_B": 0,
+            "cap_A": cap_A,
+            "cap_B": cap_B,
+            "raw_value": 0,
+            "fit_multiplier": 0,
+            "final_value": 0,
+            "cost": None,
+        }
 
-    payoff = value - cost
-    return payoff
+    raw_value = _type_base_project_value(true_type, D, V1, V2)
+    fit = _type_plan_multiplier(true_type, plan.name)
+    final_value = raw_value * fit
+    payoff = final_value - best_cost
+
+    return {
+        "payoff": payoff,
+        "valid": True,
+        "borrow_A": best_a,
+        "borrow_B": best_b,
+        "cap_A": cap_A,
+        "cap_B": cap_B,
+        "raw_value": raw_value,
+        "fit_multiplier": fit,
+        "final_value": final_value,
+        "cost": best_cost,
+    }
+
+
+# ============================================================
+#  FIRM CHOICE GIVEN CURRENT CATALOG
+# ============================================================
+
+def _principal_intended_plan_name(principal: PrincipalInfo) -> str:
+    weights = {
+        "safe": principal.pi_safe,
+        "mixed": principal.pi_mixed,
+        "risky": principal.pi_risky,
+    }
+    return max(weights, key=weights.get)
 
 
 def _simulate_firm_choice(true_type: FirmType,
                           principal: PrincipalInfo,
                           plans: Dict[str, Plan]) -> Dict:
     """
-    For a single firm:
-      - compute payoff under each plan (safe/mixed/risky),
-      - compare them with Club C (0),
-      - choose the best option.
+    One-shot choice among safe/mixed/risky vs opt-out
+    given the CURRENT plans.
     """
+
     D = principal.funding_need
     V1, V2 = principal.project_returns
 
     plan_payoffs: Dict[str, float] = {}
-    for plan_name, plan in plans.items():
-        p = _compute_plan_payoff_for_true_type(true_type, D, V1, V2, plan)
-        plan_payoffs[plan_name] = p
+    plan_details: Dict[str, Dict] = {}
 
-    # Club C payoff = 0 (always available)
-    opt_out_payoff = 0.0
+    for name, plan in plans.items():
+        details = _compute_plan_payoff_for_true_type(true_type, D, V1, V2, plan)
+        plan_payoffs[name] = details["payoff"]
+        plan_details[name] = details
 
-    # Determine best plan among safe/mixed/risky
-    # (we don't clamp negatives yet; choice vs Club C decides that)
-    best_plan_name = None
-    best_plan_payoff = float("-inf")
-    for name, p in plan_payoffs.items():
-        if p > best_plan_payoff:
-            best_plan_payoff = p
-            best_plan_name = name
+    best_plan = max(plan_payoffs, key=lambda k: plan_payoffs[k])
+    best_payoff = plan_payoffs[best_plan]
 
-    # Now compare with Club C
-    if best_plan_payoff is None or best_plan_payoff <= 0.0:
+    if best_payoff <= 0:
         chosen_plan = "opt_out"
-        chosen_payoff = opt_out_payoff
+        chosen_payoff = 0.0
     else:
-        chosen_plan = best_plan_name
-        chosen_payoff = best_plan_payoff
+        chosen_plan = best_plan
+        chosen_payoff = best_payoff
 
     intended = _principal_intended_plan_name(principal)
 
@@ -530,52 +460,87 @@ def _simulate_firm_choice(true_type: FirmType,
         "chosen_plan": chosen_plan,
         "deviation": (chosen_plan not in [intended, "opt_out"]),
         "non_participation": (chosen_plan == "opt_out"),
-        "payoffs": {
-            "safe": plan_payoffs["safe"],
-            "mixed": plan_payoffs["mixed"],
-            "risky": plan_payoffs["risky"],
-            "opt_out": opt_out_payoff,
-        },
+        "payoffs": plan_payoffs,
+        "plan_details": plan_details,
         "chosen_payoff": chosen_payoff,
     }
 
 
 # ============================================================
-#  PUBLIC ENTRYPOINT: RUN SIMULATION
+#  CATALOG UPDATE RULES
+# ============================================================
+
+def _adjust_price(side: PlanSide, delta: float) -> None:
+    side.zcb_price = max(0.5, min(0.995, side.zcb_price + delta))
+
+
+def _adjust_cap(side: PlanSide, mult: float, D: float) -> None:
+    new_cap = side.max_cap * mult
+    side.max_cap = max(0.0, min(2.0 * D, new_cap))
+
+
+def _update_plans_for_firm(state: FirmSimState,
+                           choice_info: Dict) -> None:
+    """
+    Very simple update rule for now:
+
+    - If firm opts out:
+        -> Make ALL plans more attractive:
+           lower prices slightly, increase caps slightly.
+
+    - If firm chooses a plan P:
+        -> Make P slightly WORSE (raise price a bit),
+        -> Make all other plans slightly BETTER (lower price a bit),
+        -> Keep caps unchanged for now.
+
+    This fits your idea:
+      "Offer better alternatives; if firm still sticks, we infer type".
+    """
+
+    D = state.principal.funding_need
+    chosen = choice_info["chosen_plan"]
+
+    if chosen == "opt_out":
+        for plan in state.plans.values():
+            _adjust_price(plan.club_A, delta=-0.01)
+            _adjust_price(plan.club_B, delta=-0.01)
+            _adjust_cap(plan.club_A, mult=1.10, D=D)
+            _adjust_cap(plan.club_B, mult=1.10, D=D)
+        return
+
+    # Non-opt-out: chosen plan vs rivals
+    for name, plan in state.plans.items():
+        if name == chosen:
+            # chosen plan: make slightly worse
+            _adjust_price(plan.club_A, delta=+0.005)
+            _adjust_price(plan.club_B, delta=+0.005)
+        else:
+            # rivals: make slightly better
+            _adjust_price(plan.club_A, delta=-0.005)
+            _adjust_price(plan.club_B, delta=-0.005)
+    # caps unchanged here (you can experiment later)
+
+
+# ============================================================
+#  PUBLIC ENTRYPOINT — MULTI-ROUND WITH LOCKING
 # ============================================================
 
 def run_catalog_simulation(scenario: Dict) -> Dict:
     """
-    Steps:
-      3. For each firm: from beliefs + project data, compute type probabilities
-         and welfare orientation (short vs long).
-      4. Build a 3-plan catalog (safe / mixed / risky) per firm.
-      5. Simulate each firm (using its TRUE type) choosing the best plan,
-         or Club C (non-participation) when all actual payoffs are <= 0.
+    Multi-round simulation with per-firm catalog adaptation
+    and locking when choices stabilize.
 
-    Input 'scenario':
-      {
-        "firms": [
-          {
-            "id": 1,
-            "principal": {
-               "funding_need": 120.0,
-               "project_returns": [0.9, 1.2],
-               "belief_safe_score": 60.0,
-            },
-            "actual": {
-               "type": "risky"
-            }
-          },
-          ...
-        ]
-      }
+    A firm is locked when it chooses the same non-opt-out plan
+    for STABLE_THRESHOLD consecutive rounds.
     """
 
+    MAX_ROUNDS = 10
+    STABLE_THRESHOLD = 3
+
     firms_input = scenario.get("firms", [])
-    results: List[FirmCatalogResult] = []
-    welfare_hints = []
-    realized_payoffs = []
+
+    # 1) Initial principal info & catalogs
+    firm_states: List[FirmSimState] = []
 
     for f in firms_input:
         firm_id = f["id"]
@@ -584,75 +549,145 @@ def run_catalog_simulation(scenario: Dict) -> Dict:
 
         D = float(p_raw["funding_need"])
         V1, V2 = p_raw["project_returns"]
-        belief_safe_score = float(p_raw["belief_safe_score"])
+        safe_score = float(p_raw["belief_safe_score"])
         true_type: FirmType = a_raw["type"]
 
-        # Belief decomposition
-        beliefs = _compute_beliefs_from_safe_score(belief_safe_score)
+        beliefs = _compute_beliefs_from_safe_score(safe_score)
 
         principal = PrincipalInfo(
             funding_need=D,
             project_returns=[V1, V2],
-            belief_safe_score=belief_safe_score,
+            belief_safe_score=safe_score,
             pi_safe=beliefs["pi_safe"],
             pi_mixed=beliefs["pi_mixed"],
             pi_risky=beliefs["pi_risky"],
         )
 
-        # Step 3: orientation / expected welfare
         scores = _orientation_scores(principal)
-        expected_welfare_hint = max(scores["expected_short"], scores["expected_long"])
-        welfare_hints.append(expected_welfare_hint)
-
-        # Step 4: build plans
         plans = _build_plans_from_orientation(principal, scores)
 
-        # Step 5: firm chooses plan (or opt-out)
-        choice_info = _simulate_firm_choice(true_type, principal, plans)
-        realized_payoffs.append(choice_info["chosen_payoff"])
-
-        firm_result = FirmCatalogResult(
-            firm_id=firm_id,
-            principal=principal,
-            plans=plans,
-            opt_out=True,
-            expected_welfare_hint=expected_welfare_hint,
-            choice=choice_info,
+        firm_states.append(
+            FirmSimState(
+                firm_id=firm_id,
+                principal=principal,
+                true_type=true_type,
+                plans=plans,
+            )
         )
-        results.append(firm_result)
 
-    # Aggregate welfare hints and realized payoffs
+    welfare_hints: List[float] = []
+    realized_payoffs: List[float] = []
+    rounds_run = 0
+
+    # 2) Iteration loop
+    for r in range(1, MAX_ROUNDS + 1):
+        rounds_run = r
+        all_locked = True
+
+        for state in firm_states:
+            if state.locked:
+                continue
+
+            all_locked = False
+
+            # compute orientation welfare hint this round
+            scores = _orientation_scores(state.principal)
+            welfare_hint = max(scores["expected_short"], scores["expected_long"])
+            welfare_hints.append(welfare_hint)
+
+            # simulate choice under current plans
+            choice_info = _simulate_firm_choice(state.true_type, state.principal, state.plans)
+            chosen = choice_info["chosen_plan"]
+
+            # update lock / stability
+            if chosen == state.last_chosen_plan and chosen != "opt_out":
+                state.stable_rounds += 1
+            else:
+                state.stable_rounds = 1 if chosen != "opt_out" else 0
+
+            if state.stable_rounds >= STABLE_THRESHOLD and chosen != "opt_out":
+                state.locked = True
+
+            state.last_chosen_plan = chosen
+
+            # record history for this iteration
+            snapshot_plans = {
+                name: {
+                    "club_A": {
+                        "zcb_price": p.club_A.zcb_price,
+                        "max_cap": p.club_A.max_cap,
+                    },
+                    "club_B": {
+                        "zcb_price": p.club_B.zcb_price,
+                        "max_cap": p.club_B.max_cap,
+                    },
+                }
+                for name, p in state.plans.items()
+            }
+
+            state.history.append({
+                "iteration": r,
+                "plans": snapshot_plans,
+                "choice": choice_info,
+            })
+
+            realized_payoffs.append(choice_info["chosen_payoff"])
+
+            # if not locked, update catalog for next round
+            if not state.locked:
+                _update_plans_for_firm(state, choice_info)
+
+        if all_locked:
+            break
+
+    # 3) Aggregate results
     avg_welfare_hint = sum(welfare_hints) / len(welfare_hints) if welfare_hints else 0.0
     avg_realized_payoff = sum(realized_payoffs) / len(realized_payoffs) if realized_payoffs else 0.0
 
-    # Convert dataclasses to dicts
-    result_dicts = []
-    for r in results:
-        result_dicts.append({
-            "firm_id": r.firm_id,
+    results: List[Dict] = []
+
+    for state in firm_states:
+        if state.history:
+            final_choice = state.history[-1]["choice"]
+        else:
+            # fallback if no rounds ran for some reason
+            final_choice = {
+                "true_type": state.true_type,
+                "principal_intended_plan": _principal_intended_plan_name(state.principal),
+                "chosen_plan": "opt_out",
+                "deviation": False,
+                "non_participation": True,
+                "payoffs": {"safe": 0.0, "mixed": 0.0, "risky": 0.0},
+                "plan_details": {},
+                "chosen_payoff": 0.0,
+            }
+
+        results.append({
+            "firm_id": state.firm_id,
             "principal": {
-                "funding_need": r.principal.funding_need,
-                "project_returns": r.principal.project_returns,
-                "belief_safe_score": r.principal.belief_safe_score,
-                "pi_safe": r.principal.pi_safe,
-                "pi_mixed": r.principal.pi_mixed,
-                "pi_risky": r.principal.pi_risky,
+                "funding_need": state.principal.funding_need,
+                "project_returns": state.principal.project_returns,
+                "belief_safe_score": state.principal.belief_safe_score,
+                "pi_safe": state.principal.pi_safe,
+                "pi_mixed": state.principal.pi_mixed,
+                "pi_risky": state.principal.pi_risky,
             },
             "plans": {
                 name: {
                     "club_A": asdict(plan.club_A),
                     "club_B": asdict(plan.club_B),
                 }
-                for name, plan in r.plans.items()
+                for name, plan in state.plans.items()
             },
-            "opt_out": r.opt_out,
-            "expected_welfare_hint": r.expected_welfare_hint,
-            "choice": r.choice,
+            "locked": state.locked,
+            "expected_welfare_hint": None,  # per-round hints are in history if needed
+            "choice": final_choice,
+            "history": state.history,
         })
 
     return {
-        "welfare": avg_welfare_hint,              # principal's ex-ante welfare hint
-        "realized_payoff": avg_realized_payoff,   # average ex-post firm payoff
-        "iterations": 1,
-        "results": result_dicts,
+        "welfare": avg_welfare_hint,
+        "realized_payoff": avg_realized_payoff,
+        "iterations": rounds_run,
+        "results": results,
     }
