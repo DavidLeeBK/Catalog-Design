@@ -24,8 +24,15 @@ st.divider()
 st.markdown("### 🔧 Global Configuration")
 
 num_firms = st.number_input("Number of firms", 1, 10, 3)
-
 st.caption("Number of firms participating in the delegated lending mechanism.")
+
+c1,c2 = st.columns(2)
+with c1:
+    st.number_input("Club A funds available", 0.0, None, 500.0, 10.0, key="club_a_funds")
+with c2:
+    st.number_input("Club B funds available", 0.0, None, 500.0, 10.0, key="club_b_funds")
+st.caption("Total funds available in each lending club.")
+
 st.divider()
 
 # =========================================================
@@ -109,7 +116,10 @@ if not st.session_state.confirm_mode:
         # Store scenario
         st.session_state.scenario = {
             "firms": firms,
+            "club_a_funds": float(st.session_state.club_a_funds),
+            "club_b_funds": float(st.session_state.club_b_funds),
         }
+
 
         st.session_state.confirm_mode = True
         st.rerun()
