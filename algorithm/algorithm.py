@@ -438,7 +438,7 @@ def _build_plans_from_orientation(principal: PrincipalInfo,
 
         return items
 
-    # 7) Build catalogs
+    # 6) Build catalogs
     return {
         "safe":  build_single_catalog("safe", diff_safe),
         "mixed": build_single_catalog("mixed", diff_mixed),
@@ -539,7 +539,7 @@ def _compute_plan_payoff(
             best_B = B_min
             continue
 
-        # 1️⃣ Minimize total number of bonds
+        # 1) Minimize total number of bonds
         if total_caps < best_total_caps:
             best_total_caps = total_caps
             best_funds = funds
@@ -547,15 +547,15 @@ def _compute_plan_payoff(
             best_A = A
             best_B = B_min
 
-        # 2️⃣ Same number of bonds → minimize funds borrowed
+        # 2) Same number of bonds → maximize funds borrowed
         elif total_caps == best_total_caps:
-            if funds < best_funds:
+            if funds > best_funds:
                 best_funds = funds
                 best_tie = tie
                 best_A = A
                 best_B = B_min
 
-            # 3️⃣ Same bonds & same funds → deterministic tie-break
+            # 3) Same bonds & same funds → deterministic tie-break
             elif abs(funds - best_funds) < 1e-9:
                 if tie < best_tie:
                     best_tie = tie
@@ -627,7 +627,7 @@ def _simulate_firm_choice(true_type: FirmType,
     effective_plans = {}      # Plan object for the best item of the catalog
 
     # --------------------------------------------
-    # 1. Evaluate RAW payoffs within each catalog
+    # 1) Evaluate RAW payoffs within each catalog
     # --------------------------------------------
     for plan_name, items in catalogs.items():
         best_raw = float("-inf")
@@ -679,7 +679,7 @@ def _simulate_firm_choice(true_type: FirmType,
         best_item_index[plan_name] = best_idx
 
     # --------------------------------------------
-    # 2. Apply TYPE–PLAN MULTIPLIER at catalog level
+    # 2) Apply TYPE–PLAN MULTIPLIER at catalog level
     # --------------------------------------------
     adjusted_payoffs = {}
     for plan_name, raw_val in raw_payoffs.items():
@@ -687,7 +687,7 @@ def _simulate_firm_choice(true_type: FirmType,
         adjusted_payoffs[plan_name] = raw_val * mult
 
     # --------------------------------------------
-    # 3. Choose catalog with highest adjusted payoff
+    # 3) Choose catalog with highest adjusted payoff
     # --------------------------------------------
     best_catalog = max(adjusted_payoffs, key=lambda k: adjusted_payoffs[k])
     best_adjusted_payoff = adjusted_payoffs[best_catalog]
