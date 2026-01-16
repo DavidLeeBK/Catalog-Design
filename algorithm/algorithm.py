@@ -725,72 +725,79 @@ def _simulate_firm_choice(true_type: FirmType,
 def _fmt_price(x: float) -> float:
     return float(f"{max(0.50, min(0.99, x)):.2f}")
 
+
 def _update_plans_for_firm(state: FirmSimState, choice_info: Dict) -> None:
     """
-    Each catalog updates its prices based on its OWN hypothetical usage,
-    regardless of whether it was chosen.
+    Self-learning update (non-additive caps, per-catalog ceiling)
 
-      - If usage is HIGH (near cap)  -> price FALLS by 0.01
-      - If usage is LOW (far cap)    -> price RISES by 0.01
-      - Otherwise                   -> no change
+    - Each catalog's cap ceiling is state.cap_limits[cat]  (this is the 90% offered)
+    - Firm chooses only ONE catalog, so we never add caps across catalogs.
+    - Prices update for every catalog based on hypothetical usage.
+    - If opt-out: ONLY the 'closest' catalog expands caps toward its own ceiling,
+      and never beyond it.
     """
 
     STEP = 0.01
     CAP_GROWTH = 1.05
-    
+
     plan_details = choice_info.get("plan_details", {})
     chosen_plan = choice_info.get("chosen_plan")
-    adjusted_payoffs = choice_info.get("adjusted_payoffs", {})
-    
+
+    # firm-level offered (after reserve) is the TRUE absolute cap per side
     firm_capA = int(round(state.firm_budget["A"]))
     firm_capB = int(round(state.firm_budget["B"]))
-    
-    if chosen_plan == "opt_out" and adjusted_payoffs:
 
-        # Identify the "closest" catalog (highest adjusted payoff)
-        target_catalog = max(adjusted_payoffs, key=lambda k: adjusted_payoffs[k])
+    if chosen_plan == "opt_out":
 
-        items = state.plans[target_catalog]
+        # Grow caps for ALL catalogs (since firm rejected everything)
+        for cat_name, items in state.plans.items():
 
-        # Expand caps
-        for item in items:
-            item["short_cap"] = int(round(item["short_cap"] * CAP_GROWTH))
-            item["long_cap"]  = int(round(item["long_cap"]  * CAP_GROWTH))
+            # Use the catalog's initial caps as the "shape anchor"
+            # (store these in state.cap_limits already as your initial caps)
+            initA, initB = state.cap_limits[cat_name]
 
-        # ---- Renormalize if firm hard caps exceeded ----
-        total_A = sum(items[0]["short_cap"] for items in state.plans.values())
-        total_B = sum(items[0]["long_cap"]  for items in state.plans.values())
+            # If something is zero, avoid division issues
+            if initA <= 0 and initB <= 0:
+                continue
 
-        if total_A > firm_capA:
-            scale_A = firm_capA / total_A
-            for cat_items in state.plans.values():
-                for item in cat_items:
-                    item["short_cap"] = int(round(item["short_cap"] * scale_A))
+            # Compute how far this catalog is allowed to scale while respecting firm offered caps
+            # and preserving the catalog's A:B ratio
+            scaleA_max = (firm_capA / initA) if initA > 0 else float("inf")
+            scaleB_max = (firm_capB / initB) if initB > 0 else float("inf")
+            scale_max = min(scaleA_max, scaleB_max)
 
-        if total_B > firm_capB:
-            scale_B = firm_capB / total_B
-            for cat_items in state.plans.values():
-                for item in cat_items:
-                    item["long_cap"] = int(round(item["long_cap"] * scale_B))
-                                 
+            ceilA = int(round(initA * scale_max)) if initA > 0 else 0
+            ceilB = int(round(initB * scale_max)) if initB > 0 else 0
+
+            # Grow each menu item toward its catalog ceiling (never decrease)
+            for item in items:
+                newA = int(round(item["short_cap"] * CAP_GROWTH))
+                newB = int(round(item["long_cap"]  * CAP_GROWTH))
+
+                item["short_cap"] = min(ceilA, max(item["short_cap"], newA))
+                item["long_cap"]  = min(ceilB, max(item["long_cap"],  newB))
+
+
+    # ---------------------------------------------------
+    # 2) PRICE UPDATES (all catalogs) based on usage
+    # ---------------------------------------------------
     if not plan_details:
-        return  # safety guard
+        return
 
     for cat_name, items in state.plans.items():
         details = plan_details.get(cat_name)
         if not details:
             continue
 
-        capA = details["A"]
-        capB = details["B"]
+        borrowA = details["A"]
+        borrowB = details["B"]
         max_capA, max_capB = details["caps"]
 
-        # Compute usage ratio for THIS catalog
-        usageA = (capA / max_capA) if capA > 0 else 0.0
-        usageB = (capB / max_capB) if capB > 0 else 0.0
+        # FIX: guards should check max_cap, not borrow
+        usageA = (borrowA / max_capA) if max_capA > 0 else 0.0
+        usageB = (borrowB / max_capB) if max_capB > 0 else 0.0
         usage = max(usageA, usageB)
 
-        # Decide price adjustment (your rule)
         if usage >= 0.85:
             delta = -STEP
         elif usage <= 0.45:
@@ -798,7 +805,6 @@ def _update_plans_for_firm(state: FirmSimState, choice_info: Dict) -> None:
         else:
             delta = 0.0
 
-        # Apply update to ALL items in this catalog
         for item in items:
             item["short_price"] = _fmt_price(item["short_price"] + delta)
             item["long_price"]  = _fmt_price(item["long_price"]  + delta)

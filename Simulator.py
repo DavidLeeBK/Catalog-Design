@@ -3,6 +3,57 @@ import time
 from algorithm.algorithm import run_catalog_simulation
 from data.db import init_db, save_simulation
 
+st.markdown(
+    """
+    <style>
+    /* Main app font */
+    html, body, [class*="css"]  {
+        font-size: 18px !important;
+    }
+
+    /* Page title */
+    h1 {
+        font-size: 40px !important;
+    }
+
+    /* Section headers */
+    h2 {
+        font-size: 32px !important;
+    }
+
+    h3 {
+        font-size: 26px !important;
+    }
+
+    h4 {
+        font-size: 22px !important;
+    }
+
+    /* Labels above inputs */
+    label {
+        font-size: 18px !important;
+    }
+
+    /* Input text, dropdowns, buttons */
+    input, textarea, select, button {
+        font-size: 18px !important;
+    }
+
+    /* Tables */
+    .stDataFrame, .stTable {
+        font-size: 17px !important;
+    }
+
+    /* Metrics */
+    div[data-testid="metric-container"] {
+        font-size: 18px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
 # =========================================================
 #  Page setup
 # =========================================================
